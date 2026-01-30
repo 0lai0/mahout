@@ -45,7 +45,7 @@ impl QuantumTensor {
     /// The capsule can only be consumed once to prevent double-free errors.
     ///
     /// Args:
-    ///     stream: Optional CUDA stream pointer (for DLPack 0.8+)
+    ///     stream: Optional CUDA stream (DLPack 0.8+; 1=legacy default, 2=per-thread default)
     ///
     /// Returns:
     ///     PyCapsule containing DLManagedTensor pointer
@@ -54,7 +54,6 @@ impl QuantumTensor {
     ///     RuntimeError: If the tensor has already been consumed
     #[pyo3(signature = (stream=None))]
     fn __dlpack__<'py>(&mut self, py: Python<'py>, stream: Option<i64>) -> PyResult<Py<PyAny>> {
-        let _ = stream; // Suppress unused variable warning
         if self.consumed {
             return Err(PyRuntimeError::new_err(
                 "DLPack tensor already consumed (can only be used once)",
@@ -63,6 +62,17 @@ impl QuantumTensor {
 
         if self.ptr.is_null() {
             return Err(PyRuntimeError::new_err("Invalid DLPack tensor pointer"));
+        }
+
+        if let Some(stream) = stream
+            && stream > 0
+        {
+            let stream_ptr = qdp_core::dlpack::dlpack_stream_to_cuda(stream);
+            unsafe {
+                qdp_core::dlpack::synchronize_stream(stream_ptr).map_err(|e| {
+                    PyRuntimeError::new_err(format!("CUDA stream sync failed: {}", e))
+                })?;
+            }
         }
 
         // Mark as consumed to prevent double-free
@@ -218,10 +228,11 @@ fn validate_cuda_tensor_for_encoding(
     expected_device_id: usize,
     encoding_method: &str,
 ) -> PyResult<()> {
-    // Check encoding method support (currently only amplitude is supported for CUDA tensors)
-    if encoding_method != "amplitude" {
+    let method = encoding_method.to_ascii_lowercase();
+    // Check encoding method support (currently amplitude and angle are supported for CUDA tensors)
+    if method != "amplitude" && method != "angle" {
         return Err(PyRuntimeError::new_err(format!(
-            "CUDA tensor encoding currently only supports 'amplitude' method, got '{}'. \
+            "CUDA tensor encoding currently only supports 'amplitude' and 'angle' methods, got '{}'. \
              Use tensor.cpu() to convert to CPU tensor for other encoding methods.",
             encoding_method
         )));
@@ -796,6 +807,12 @@ impl QdpEngine {
 /// GPU-accelerated quantum data encoding with DLPack integration.
 #[pymodule]
 fn _qdp(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Initialize Rust logging system - respect RUST_LOG environment variable
+    // Ref: https://docs.rs/env_logger/latest/env_logger/
+    // try_init() won't fail if logger is already initialized (e.g., by another library)
+    // This allows Rust log messages to be visible when RUST_LOG is set
+    let _ = env_logger::Builder::from_default_env().try_init();
+
     m.add_class::<QdpEngine>()?;
     m.add_class::<QuantumTensor>()?;
     Ok(())
