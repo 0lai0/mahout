@@ -147,7 +147,20 @@ pub use angle::AngleEncoder;
 pub use basis::BasisEncoder;
 pub use iqp::IqpEncoder;
 
-/// Create encoder by name: "amplitude", "angle", "basis", "iqp", or "iqp-z"
+/// Create an encoder by name: `"amplitude"`, `"angle"`, `"basis"`, `"iqp"`, or `"iqp-z"`.
+///
+/// # Performance Note
+///
+/// The current implementation calls [`str::to_lowercase`] on every invocation,
+/// which allocates a new `String`. In hot-path / batch-processing scenarios this
+/// overhead is measurable. A future improvement (tracked in the code review) will
+/// replace the string-based dispatch with an `EncodingMethod` enum implementing
+/// [`FromStr`], eliminating both the allocation and the string comparison.
+///
+/// # Errors
+///
+/// Returns [`MahoutError::InvalidInput`] if `name` does not match any known encoder.
+// TODO(GSoC): Replace string-based dispatch with EncodingMethod enum (code review item #3).
 pub fn get_encoder(name: &str) -> Result<Box<dyn QuantumEncoder>> {
     match name.to_lowercase().as_str() {
         "amplitude" => Ok(Box::new(AmplitudeEncoder)),
@@ -161,3 +174,17 @@ pub fn get_encoder(name: &str) -> Result<Box<dyn QuantumEncoder>> {
         ))),
     }
 }
+
+// TODO(GSoC): Add unit tests for validate_qubit_count and get_encoder — currently 0% test coverage.
+// Planned tests (~5):
+//
+// validate_qubit_count:
+//   - rejects 0 qubits
+//   - accepts 1 qubit (minimum)
+//   - accepts MAX_QUBITS (30)
+//   - rejects MAX_QUBITS + 1 (31)
+//
+// get_encoder:
+//   - returns AmplitudeEncoder for "amplitude"
+//   - case-insensitive: "AMPLITUDE" works
+//   - returns error for unknown encoder name
