@@ -17,6 +17,35 @@
 // Allow unused_unsafe: CUDA FFI and kernel functions are unsafe in CUDA builds but safe stubs in no-CUDA builds.
 // The compiler can't statically determine which path is taken.
 #![allow(unused_unsafe)]
+//! # qdp-core — GPU-accelerated Quantum Data Plane
+//!
+//! `qdp-core` is the Rust core of the QDP subsystem in Apache Mahout. It provides:
+//!
+//! - **Quantum encoding**: Encode classical data into quantum state vectors on the GPU
+//!   using amplitude, angle, basis, and IQP encoding strategies (see [`gpu::encodings`]).
+//! - **GPU memory management**: Safe wrappers around CUDA allocation, pinned host buffers,
+//!   and precision conversion (see [`gpu::memory`]).
+//! - **DLPack interop**: Zero-copy tensor exchange with PyTorch via the DLPack protocol
+//!   (see [`dlpack`]).
+//! - **Async pipeline**: Double-buffered H2D copy + kernel overlap for high-throughput
+//!   encoding (see [`gpu::pipeline`]).
+//! - **I/O readers**: Load data from Parquet, Arrow IPC, NumPy, PyTorch, and TensorFlow
+//!   formats (see [`io`], [`readers`]).
+//!
+//! ## Architecture
+//!
+//! ```text
+//! Python (qumat / qumat_qdp)  ──PyO3──▶  qdp-python
+//!                                              │
+//!                                              ▼
+//!                                         qdp-core  (this crate)
+//!                                              │
+//!                                         qdp-kernels  (CUDA .cu)
+//! ```
+//!
+//! ## Feature Flags
+//!
+//! - `remote-io`: Enable remote data loading (S3, HTTP) via the [`remote`] module.
 
 pub mod dlpack;
 #[cfg(target_os = "linux")]

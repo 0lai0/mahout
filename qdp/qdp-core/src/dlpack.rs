@@ -14,7 +14,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// DLPack protocol for zero-copy GPU memory sharing with PyTorch
+//! DLPack protocol for zero-copy GPU memory sharing with PyTorch.
+//!
+//! This module implements the [DLPack](https://github.com/dmlc/dlpack) tensor exchange
+//! protocol, enabling zero-copy interoperability between QDP's GPU-resident quantum state
+//! vectors and frameworks like PyTorch via `torch.from_dlpack()`.
+//!
+//! # Architecture
+//!
+//! - [`GpuStateVector::to_dlpack`] converts a GPU state vector into a `DLManagedTensor`
+//!   pointer that PyTorch can consume.
+//! - Memory ownership is managed via `Arc<BufferStorage>`: the DLPack deleter decrements
+//!   the reference count when PyTorch releases the tensor.
+//! - Stream synchronization helpers ensure correct ordering when the producer and consumer
+//!   use different CUDA streams.
+//!
+//! # Safety
+//!
+//! This module contains `unsafe` code for FFI calls to the CUDA runtime and for
+//! constructing raw C structs (`DLTensor`, `DLManagedTensor`). Each `unsafe` block
+//! is annotated with a `// SAFETY:` comment explaining the invariants that make
+//! the call sound.
 
 #[cfg(target_os = "linux")]
 use crate::error::cuda_error_to_string;
@@ -55,6 +75,9 @@ pub unsafe fn synchronize_stream(stream: *mut c_void) -> Result<()> {
     }
 
     let mut event: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `event` is a valid mutable pointer to a null `c_void` pointer.
+    // `cudaEventCreateWithFlags` initializes it to a new CUDA event handle.
+    // The `CUDA_EVENT_DISABLE_TIMING` flag is a valid constant from cuda_ffi.
     let ret = unsafe { cudaEventCreateWithFlags(&mut event, CUDA_EVENT_DISABLE_TIMING) };
     if ret != 0 {
         return Err(MahoutError::Cuda(format!(
@@ -64,8 +87,11 @@ pub unsafe fn synchronize_stream(stream: *mut c_void) -> Result<()> {
         )));
     }
 
+    // SAFETY: `event` was successfully created above (ret == 0). We record on the
+    // default stream (null) which is always valid.
     let record_ret = unsafe { cudaEventRecord(event, std::ptr::null_mut()) };
     if record_ret != 0 {
+        // SAFETY: `event` is a valid event created above; destroying it once is safe.
         let _ = unsafe { cudaEventDestroy(event) };
         return Err(MahoutError::Cuda(format!(
             "cudaEventRecord failed: {} ({})",
@@ -74,8 +100,11 @@ pub unsafe fn synchronize_stream(stream: *mut c_void) -> Result<()> {
         )));
     }
 
+    // SAFETY: `stream` is guaranteed valid by the caller's contract (see fn-level
+    // # Safety). `event` was successfully created and recorded above.
     let wait_ret = unsafe { cudaStreamWaitEvent(stream, event, 0) };
     if wait_ret != 0 {
+        // SAFETY: `event` is a valid event; destroying it once is safe.
         let _ = unsafe { cudaEventDestroy(event) };
         return Err(MahoutError::Cuda(format!(
             "cudaStreamWaitEvent failed: {} ({})",
@@ -84,6 +113,8 @@ pub unsafe fn synchronize_stream(stream: *mut c_void) -> Result<()> {
         )));
     }
 
+    // SAFETY: `event` is a valid event that has been recorded and waited on.
+    // Destroying it here is the final cleanup; it will not be used again.
     let destroy_ret = unsafe { cudaEventDestroy(event) };
     if destroy_ret != 0 {
         return Err(MahoutError::Cuda(format!(
@@ -171,6 +202,9 @@ pub unsafe extern "C" fn dlpack_deleter(managed: *mut DLManagedTensor) {
         return;
     }
 
+    // SAFETY: `managed` was checked non-null above. The caller (PyTorch's DLPack
+    // release path) guarantees it points to a valid `DLManagedTensor` that was
+    // originally created by `GpuStateVector::to_dlpack` via `Box::into_raw`.
     let tensor = &(*managed).dl_tensor;
 
     // 1. Free shape array (Box<[i64]>)
@@ -181,6 +215,8 @@ pub unsafe extern "C" fn dlpack_deleter(managed: *mut DLManagedTensor) {
             1
         };
         let slice_ptr: *mut [i64] = std::ptr::slice_from_raw_parts_mut(tensor.shape, len);
+        // SAFETY: `shape` was created via `Box::into_raw(shape.into_boxed_slice())`
+        // in `to_dlpack`. The length matches `ndim` set at creation time.
         let _ = Box::from_raw(slice_ptr);
     }
 
@@ -192,16 +228,22 @@ pub unsafe extern "C" fn dlpack_deleter(managed: *mut DLManagedTensor) {
             1
         };
         let slice_ptr: *mut [i64] = std::ptr::slice_from_raw_parts_mut(tensor.strides, len);
+        // SAFETY: `strides` was created via `Box::into_raw(strides.into_boxed_slice())`
+        // in `to_dlpack`. The length matches `ndim` set at creation time.
         let _ = Box::from_raw(slice_ptr);
     }
 
     // 3. Free GPU buffer (Arc reference count)
     let ctx = (*managed).manager_ctx;
     if !ctx.is_null() {
+        // SAFETY: `manager_ctx` was set to `Arc::into_raw(self.buffer.clone())` in
+        // `to_dlpack`, so reconstructing the Arc here decrements the reference count
+        // exactly once, balancing the `into_raw` call.
         let _ = Arc::from_raw(ctx as *const BufferStorage);
     }
 
-    // 4. Free DLManagedTensor
+    // SAFETY: `managed` was created via `Box::into_raw(Box::new(managed))` in
+    // `to_dlpack`. This is the single matching `Box::from_raw` that frees it.
     let _ = Box::from_raw(managed);
 }
 
@@ -231,15 +273,17 @@ pub unsafe fn free_dlpack_tensor(ptr: *mut DLManagedTensor) -> Result<()> {
         ));
     }
 
-    // SAFETY: Caller guarantees ptr is valid and not yet freed.
-    // We've checked it's not null above.
+    // SAFETY: Caller guarantees `ptr` was returned by `GpuStateVector::to_dlpack`
+    // (or equivalent) and has not been freed yet. We checked non-null above.
     let managed = &mut *ptr;
 
     let deleter = managed.deleter.take().ok_or_else(|| {
         MahoutError::InvalidInput("DLPack deleter missing or already called".into())
     })?;
 
-    // Call the DLPack deleter to free memory
+    // SAFETY: The deleter function pointer was set by `to_dlpack` and is safe to
+    // call exactly once with the original `ptr`. `take()` above ensures we cannot
+    // call it a second time.
     deleter(ptr);
     Ok(())
 }
@@ -311,3 +355,11 @@ impl GpuStateVector {
         Box::into_raw(Box::new(managed))
     }
 }
+
+// TODO(GSoC): Add test for dlpack_stream_to_cuda — currently 0% test coverage.
+// Planned tests (~2):
+//
+// dlpack_stream_to_cuda:
+//   - correctly maps CUDA_STREAM_LEGACY (1) to std::ptr::null_mut()
+//   - correctly maps CUDA_STREAM_PER_THREAD (2) to 2
+//   - correctly passes through other stream pointers

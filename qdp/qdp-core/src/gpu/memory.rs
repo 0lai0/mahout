@@ -45,24 +45,28 @@ fn bytes_to_mib(bytes: usize) -> f64 {
 
 #[cfg(target_os = "linux")]
 fn query_cuda_mem_info() -> Result<(usize, usize)> {
-    unsafe {
-        let mut free_bytes: usize = 0;
-        let mut total_bytes: usize = 0;
-        let result = cudaMemGetInfo(
+    let mut free_bytes: usize = 0;
+    let mut total_bytes: usize = 0;
+
+    // SAFETY: `free_bytes` and `total_bytes` are valid mutable references to
+    // stack-allocated `usize` values. `cudaMemGetInfo` writes the current device
+    // memory info into these pointers. No aliasing or lifetime issues.
+    let result = unsafe {
+        cudaMemGetInfo(
             &mut free_bytes as *mut usize,
             &mut total_bytes as *mut usize,
-        );
+        )
+    };
 
-        if result != 0 {
-            return Err(MahoutError::Cuda(format!(
-                "cudaMemGetInfo failed: {} ({})",
-                result,
-                cuda_error_to_string(result)
-            )));
-        }
-
-        Ok((free_bytes, total_bytes))
+    if result != 0 {
+        return Err(MahoutError::Cuda(format!(
+            "cudaMemGetInfo failed: {} ({})",
+            result,
+            cuda_error_to_string(result)
+        )));
     }
+
+    Ok((free_bytes, total_bytes))
 }
 
 #[cfg(target_os = "linux")]
@@ -214,7 +218,10 @@ pub struct GpuStateVector {
     pub device_id: usize,
 }
 
-// Safety: CudaSlice and Arc are both Send + Sync
+// SAFETY: `GpuStateVector` wraps a `CudaSlice` (inside `Arc<BufferStorage>`)
+// which is allocated via `cudarc` and freed by CUDA. CUDA device memory is
+// accessible from any host thread, and `Arc` provides thread-safe reference
+// counting. No mutable aliasing is possible through the public API.
 unsafe impl Send for GpuStateVector {}
 unsafe impl Sync for GpuStateVector {}
 
@@ -592,42 +599,53 @@ pub struct PinnedHostBuffer {
 
 #[cfg(target_os = "linux")]
 impl PinnedHostBuffer {
-    /// Allocate pinned memory
+    /// Allocate pinned (page-locked) host memory for high-throughput H2D transfers.
+    ///
+    /// # Errors
+    /// Returns `MahoutError::MemoryAllocation` if the allocation size overflows
+    /// or `cudaHostAlloc` fails.
     pub fn new(elements: usize) -> Result<Self> {
-        unsafe {
-            let bytes = elements
-                .checked_mul(std::mem::size_of::<f64>())
-                .ok_or_else(|| {
-                    MahoutError::MemoryAllocation(format!(
-                        "Requested pinned buffer allocation size overflow (elements={})",
-                        elements
-                    ))
-                })?;
-            let mut ptr: *mut c_void = std::ptr::null_mut();
+        let bytes = elements
+            .checked_mul(std::mem::size_of::<f64>())
+            .ok_or_else(|| {
+                MahoutError::MemoryAllocation(format!(
+                    "Requested pinned buffer allocation size overflow (elements={})",
+                    elements
+                ))
+            })?;
+        let mut ptr: *mut c_void = std::ptr::null_mut();
 
-            let ret = cudaHostAlloc(&mut ptr, bytes, 0); // cudaHostAllocDefault
+        // SAFETY: `ptr` is a valid mutable pointer to a null `c_void` pointer.
+        // `cudaHostAlloc` allocates `bytes` of page-locked memory and writes the
+        // address into `ptr`. Flag 0 = cudaHostAllocDefault.
+        let ret = unsafe { cudaHostAlloc(&mut ptr, bytes, 0) };
 
-            if ret != 0 {
-                return Err(MahoutError::MemoryAllocation(format!(
-                    "cudaHostAlloc failed with error code: {}",
-                    ret
-                )));
-            }
-
-            Ok(Self {
-                ptr: ptr as *mut f64,
-                size_elements: elements,
-            })
+        if ret != 0 {
+            return Err(MahoutError::MemoryAllocation(format!(
+                "cudaHostAlloc failed with error code: {}",
+                ret
+            )));
         }
+
+        Ok(Self {
+            ptr: ptr as *mut f64,
+            size_elements: elements,
+        })
     }
 
-    /// Get mutable slice to write data into
+    /// Get mutable slice to write data into.
     pub fn as_slice_mut(&mut self) -> &mut [f64] {
+        // SAFETY: `self.ptr` was allocated by `cudaHostAlloc` in `new()` with
+        // `self.size_elements * size_of::<f64>()` bytes. The pointer remains valid
+        // for the lifetime of `self` (freed in `Drop`). `&mut self` guarantees
+        // exclusive access.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size_elements) }
     }
 
-    /// Immutable slice view of the pinned region
+    /// Immutable slice view of the pinned region.
     pub fn as_slice(&self) -> &[f64] {
+        // SAFETY: Same as `as_slice_mut` — `self.ptr` is valid for
+        // `self.size_elements` elements for the lifetime of `self`.
         unsafe { std::slice::from_raw_parts(self.ptr, self.size_elements) }
     }
 
@@ -648,20 +666,23 @@ impl PinnedHostBuffer {
 #[cfg(target_os = "linux")]
 impl Drop for PinnedHostBuffer {
     fn drop(&mut self) {
-        unsafe {
-            let result = cudaFreeHost(self.ptr as *mut c_void);
-            if result != 0 {
-                eprintln!(
-                    "Warning: cudaFreeHost failed with error code {} ({})",
-                    result,
-                    cuda_error_to_string(result)
-                );
-            }
+        // SAFETY: `self.ptr` was allocated by `cudaHostAlloc` in `new()` and has
+        // not been freed yet (Drop runs exactly once). Casting back to `*mut c_void`
+        // is valid because `cudaFreeHost` expects the same pointer that was returned
+        // by `cudaHostAlloc`.
+        let result = unsafe { cudaFreeHost(self.ptr as *mut c_void) };
+        if result != 0 {
+            log::warn!(
+                "cudaFreeHost failed with error code {} ({})",
+                result,
+                cuda_error_to_string(result)
+            );
         }
     }
 }
 
-// Safety: Pinned memory is accessible from any thread
+// SAFETY: Pinned (page-locked) memory allocated by `cudaHostAlloc` is accessible
+// from any host thread. The buffer pointer does not alias any other allocation.
 #[cfg(target_os = "linux")]
 unsafe impl Send for PinnedHostBuffer {}
 
