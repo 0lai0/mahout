@@ -16,28 +16,47 @@
 
 use thiserror::Error;
 
-/// Error types for Mahout QDP operations
+/// Error types for Mahout QDP operations.
+///
+/// Each variant captures a human-readable message describing the failure context.
+/// Use the [`Display`](std::fmt::Display) impl (via `thiserror`) for user-facing
+/// error messages, and [`Debug`] for developer diagnostics.
 #[derive(Error, Debug)]
 pub enum MahoutError {
+    /// A CUDA runtime API call failed.
+    ///
+    /// The inner string contains the function name and the CUDA error code
+    /// translated by [`cuda_error_to_string`].
     #[error("CUDA error: {0}")]
     Cuda(String),
 
+    /// The caller provided invalid input (e.g., zero qubits, wrong tensor shape).
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// A GPU memory allocation failed, typically due to out-of-memory.
+    ///
+    /// The message includes requested size, available memory, and suggested remediation.
     #[error("Memory allocation failed: {0}")]
     MemoryAllocation(String),
 
+    /// A CUDA kernel launch failed.
+    ///
+    /// The message includes the kernel name and the CUDA error code.
     #[error("Kernel launch failed: {0}")]
     KernelLaunch(String),
 
+    /// A DLPack protocol operation failed (e.g., null pointer, missing deleter).
     #[error("DLPack operation failed: {0}")]
     DLPack(String),
 
+    /// An I/O error without an underlying [`std::io::Error`] source.
     #[error("I/O error: {0}")]
     Io(String),
 
-    /// I/O error with underlying cause (enables Error::source() and downcast).
+    /// An I/O error with the underlying [`std::io::Error`] preserved as a source.
+    ///
+    /// Enables [`Error::source()`](std::error::Error::source) and downcasting.
     #[error("I/O error: {message}")]
     IoWithSource {
         message: String,
@@ -45,6 +64,7 @@ pub enum MahoutError {
         source: std::io::Error,
     },
 
+    /// Functionality that is not yet implemented.
     #[error("Not implemented: {0}")]
     NotImplemented(String),
 }
@@ -90,4 +110,16 @@ mod tests {
         let source = err.source().expect("IoWithSource must have source");
         assert!(source.downcast_ref::<io::Error>().is_some());
     }
+
+    // TODO(GSoC): Add tests for cuda_error_to_string and MahoutError Display — currently only 1 test.
+    // Planned tests (~3):
+    //
+    // cuda_error_to_string:
+    //   - known error code (e.g., 2 → "cudaErrorMemoryAllocation")
+    //   - unknown error code (e.g., 9999 → "Unknown CUDA error")
+    //   - CUDA unavailable stub (999 → "CUDA unavailable (non-Linux stub)")
+    //
+    // MahoutError Display:
+    //   - Cuda variant formats correctly
+    //   - InvalidInput variant formats correctly
 }

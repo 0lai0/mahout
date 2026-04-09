@@ -76,14 +76,15 @@ impl PipelineContext {
         let mut events_copy_done = Vec::with_capacity(event_slots);
         for _ in 0..event_slots {
             let mut ev: *mut c_void = std::ptr::null_mut();
-            unsafe {
-                let ret = cudaEventCreateWithFlags(&mut ev, CUDA_EVENT_DISABLE_TIMING);
-                if ret != 0 {
-                    return Err(MahoutError::Cuda(format!(
-                        "Failed to create CUDA event: {}",
-                        ret
-                    )));
-                }
+            // SAFETY: `ev` is a valid mutable pointer to a null `c_void` pointer.
+            // `cudaEventCreateWithFlags` initializes it to a new CUDA event.
+            // `CUDA_EVENT_DISABLE_TIMING` is a valid flag constant.
+            let ret = unsafe { cudaEventCreateWithFlags(&mut ev, CUDA_EVENT_DISABLE_TIMING) };
+            if ret != 0 {
+                return Err(MahoutError::Cuda(format!(
+                    "Failed to create CUDA event: {}",
+                    ret
+                )));
             }
             events_copy_done.push(ev);
         }
@@ -210,11 +211,12 @@ mod tests {
 #[cfg(target_os = "linux")]
 impl Drop for PipelineContext {
     fn drop(&mut self) {
-        unsafe {
-            for ev in &mut self.events_copy_done {
-                if !ev.is_null() {
-                    let _ = cudaEventDestroy(*ev);
-                }
+        for ev in &mut self.events_copy_done {
+            if !ev.is_null() {
+                // SAFETY: Each event was successfully created by
+                // `cudaEventCreateWithFlags` in `new()`. We only destroy
+                // non-null events, and `Drop` runs exactly once.
+                let _ = unsafe { cudaEventDestroy(*ev) };
             }
         }
     }
@@ -332,13 +334,21 @@ where
     // Pinned host staging pool sized to the current chunking strategy (double-buffer by default).
     const PINNED_POOL_SIZE: usize = 2; // double buffering
 
-    // Check environment variables for observability features
-    let enable_pool_metrics = std::env::var("QDP_ENABLE_POOL_METRICS")
-        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let enable_overlap_tracking = std::env::var("QDP_ENABLE_OVERLAP_TRACKING")
-        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    // Check environment variables for observability features.
+    // Cached with OnceLock to avoid repeated syscalls (getenv) on every pipeline invocation.
+    static POOL_METRICS_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static OVERLAP_TRACKING_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+    let enable_pool_metrics = *POOL_METRICS_ENABLED.get_or_init(|| {
+        std::env::var("QDP_ENABLE_POOL_METRICS")
+            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    });
+    let enable_overlap_tracking = *OVERLAP_TRACKING_ENABLED.get_or_init(|| {
+        std::env::var("QDP_ENABLE_OVERLAP_TRACKING")
+            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    });
 
     // 1. Create dual streams with per-slot events to coordinate copy -> compute
     let ctx = PipelineContext::new(device, PINNED_POOL_SIZE)?;

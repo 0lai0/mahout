@@ -14,7 +14,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Centralized CUDA Runtime API FFI declarations.
+//! Centralized CUDA Runtime API FFI declarations for QDP.
+//!
+//! This module provides low-level `extern "C"` bindings to the CUDA runtime
+//! library. All GPU-related code in `qdp-core` (memory allocation, async copies,
+//! stream/event management) calls through these declarations.
+//!
+//! # Platform Support
+//!
+//! These declarations are only meaningful on Linux with a CUDA toolkit installed.
+//! Non-Linux builds use safe stubs provided by `qdp-kernels`.
+//!
+//! # Adding New Bindings
+//!
+//! When exposing additional CUDA runtime functions:
+//! 1. Add the `extern "C"` declaration in the `unsafe extern "C"` block below.
+//! 2. Use `pub(crate)` visibility — callers outside `qdp-core` should use
+//!    higher-level wrappers (e.g., `gpu::memory`, `gpu::pipeline`).
+//! 3. Document the function with a link to the official CUDA Runtime API reference.
 
 use std::ffi::c_void;
 
