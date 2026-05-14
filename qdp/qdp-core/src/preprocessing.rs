@@ -160,3 +160,29 @@ impl Preprocessor {
             .collect()
     }
 }
+
+// TODO(GSoC): Add unit tests for Preprocessor — currently 0% test coverage.
+// Planned tests (~15):
+//
+// validate_input:
+//   - rejects empty data
+//   - rejects zero qubits
+//   - rejects qubits > MAX_QUBITS (30)
+//   - rejects data longer than 2^num_qubits
+//   - accepts valid input at boundary (len == 2^num_qubits)
+//   - accepts valid input shorter than state vector
+//
+// calculate_l2_norm:
+//   - correct norm for known vector [3.0, 4.0] → 5.0
+//   - rejects all-zero vector
+//   - rejects vector containing NaN
+//   - rejects vector containing Infinity
+//
+// validate_batch:
+//   - rejects zero num_samples
+//   - rejects mismatched batch_data length
+//   - rejects sample_size > 2^num_qubits
+//
+// calculate_batch_l2_norms:
+//   - correct norms for multi-sample batch
+//   - rejects batch with zero-norm sample
